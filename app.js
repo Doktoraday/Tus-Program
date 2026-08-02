@@ -141,7 +141,74 @@ let P = loadPersisted() || defaultPersisted();
 function persist() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(P)); }
   catch (e) { console.error('[TUS Günlüğü] failed to save', e); }
+  schedulePush();
 }
+
+/* ── Cloud sync (Firebase Realtime Database) — optional, opt-in via a
+   shared "sync code" entered on each device. Last-write-wins: whichever
+   device saved most recently (by P.updatedAt) wins on conflict. ────────── */
+
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDifUYE0uSSpexy1np1YxkpMd2eNfyEL1Q",
+  authDomain: "tus-gunlugu-eeddb.firebaseapp.com",
+  projectId: "tus-gunlugu-eeddb",
+  storageBucket: "tus-gunlugu-eeddb.firebasestorage.app",
+  messagingSenderId: "793092818337",
+  appId: "1:793092818337:web:b25b42cd487e731e97f7e0",
+  measurementId: "G-J42WJ418JC"
+};
+const SYNC_CODE_KEY = 'tusGunlugu.syncCode';
+let syncCode = localStorage.getItem(SYNC_CODE_KEY) || '';
+let draftSyncCode = syncCode;
+let syncRef = null;
+let applyingRemote = false;
+let syncStatus = syncCode ? 'connecting' : 'off'; // 'off' | 'connecting' | 'connected' | 'error'
+let pushTimer = null;
+
+function initSync() {
+  if (syncRef) { syncRef.off(); syncRef = null; }
+  if (!syncCode) { syncStatus = 'off'; render(); return; }
+  if (typeof firebase === 'undefined') { syncStatus = 'error'; render(); return; }
+  try {
+    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    const db = firebase.database();
+    syncRef = db.ref('rooms/' + syncCode);
+    syncStatus = 'connecting';
+    syncRef.on('value', (snap) => {
+      syncStatus = 'connected';
+      const remote = snap.val();
+      if (!remote) { schedulePush(); render(); return; }
+      if ((remote.updatedAt || 0) > (P.updatedAt || 0)) {
+        applyingRemote = true;
+        P = Object.assign(defaultPersisted(), remote);
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(P)); } catch (e) { /* ignore */ }
+        applyingRemote = false;
+      }
+      render();
+    }, () => { syncStatus = 'error'; render(); });
+  } catch (e) { console.error('[TUS Günlüğü] sync init failed', e); syncStatus = 'error'; render(); }
+}
+function schedulePush() {
+  if (!syncRef || applyingRemote) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => {
+    P.updatedAt = Date.now();
+    syncRef.set(P).catch(() => { syncStatus = 'error'; render(); });
+  }, 400);
+}
+function setSyncCode(code) {
+  syncCode = code.trim();
+  draftSyncCode = syncCode;
+  if (syncCode) localStorage.setItem(SYNC_CODE_KEY, syncCode);
+  else localStorage.removeItem(SYNC_CODE_KEY);
+  initSync();
+}
+function randomSyncCode() {
+  return Math.random().toString(36).slice(2, 6) + '-' + Math.random().toString(36).slice(2, 6);
+}
+function saveSyncCodeAction() { setSyncCode(draftSyncCode); }
+function generateSyncCodeAction() { setSyncCode(randomSyncCode()); }
+function disconnectSyncAction() { setSyncCode(''); }
 
 /* Transient (not persisted) UI state. */
 let UI = { tab: 'bugun', programDay: findTodayIndex(), denemeOpen: false, mistakeOpen: false, mSelKonu: null, mSelTopic: null, openDers: null };
@@ -287,9 +354,9 @@ function goalStep(delta) {
 function toggleSetting(key) { P.sw[key] = !P.sw[key]; persist(); render(); }
 function resetAllData() {
   if (!confirm('Tüm çalışma verilerin (süre, net, yanlış defteri, ayarlar) silinsin mi? Bu işlem geri alınamaz.')) return;
-  localStorage.removeItem(STORAGE_KEY);
   P = defaultPersisted();
   UI = { tab: 'ayarlar', programDay: findTodayIndex(), denemeOpen: false, mistakeOpen: false, mSelKonu: null, mSelTopic: null, openDers: null };
+  persist(); // also pushes the cleared state to any connected sync room, so it doesn't get pulled back
   render();
 }
 function installApp() {
@@ -597,8 +664,32 @@ function renderAyarlar() {
       : '<div style="font-weight:500;font-size:11px;line-height:1.6;color:var(--color-neutral-600)">iPhone: Paylaş → Ana Ekrana Ekle.<br>Android/Chrome: sağ üst ⋮ menüsü → Ana ekrana ekle.</div>';
   }
 
+  const statusLabel = { off: 'Kapalı', connecting: 'Bağlanıyor…', connected: 'Bağlı', error: 'Hata — kodu kontrol et' }[syncStatus];
+  const statusColor = syncStatus === 'connected' ? 'var(--color-accent-700)' : (syncStatus === 'error' ? 'var(--color-accent)' : 'var(--color-neutral-600)');
+  const syncSection = syncCode
+    ? ('' +
+        '<div style="padding:16px 18px;border-bottom:1px solid var(--color-divider)">' +
+          '<div style="font-weight:800;font-size:11px;letter-spacing:.16em;text-transform:uppercase">Cihazlar arası senkron</div>' +
+          '<div style="margin-top:10px;display:flex;align-items:center;justify-content:space-between;gap:10px">' +
+            '<div><div style="font-weight:700;font-size:16px;letter-spacing:.04em">' + esc(syncCode) + '</div><div style="margin-top:2px;font-weight:600;font-size:11px;color:' + statusColor + '">' + statusLabel + '</div></div>' +
+            '<button class="hv-neutral-200" data-action="disconnectSync" style="flex:none;border:2px solid var(--color-text);background:transparent;padding:10px 12px;font-weight:700;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--color-text)">Bağlantıyı kes</button>' +
+          '</div>' +
+          '<div style="margin-top:8px;font-weight:500;font-size:11px;line-height:1.5;color:var(--color-neutral-600)">Bu kodu diğer cihazında da gir — ikisi de birbiriyle anında senkron olur.</div>' +
+        '</div>')
+    : ('' +
+        '<div style="padding:16px 18px;border-bottom:1px solid var(--color-divider)">' +
+          '<div style="font-weight:800;font-size:11px;letter-spacing:.16em;text-transform:uppercase">Cihazlar arası senkron</div>' +
+          '<div style="margin-top:10px;display:flex;gap:8px">' +
+            '<input id="syncCodeInput" type="text" value="' + esc(draftSyncCode) + '" placeholder="senkron kodu" class="field-input" style="flex:1;font-weight:700;font-size:14px;letter-spacing:.04em">' +
+            '<button class="hv-fill-accent" data-action="saveSyncCode" style="flex:none;border:2px solid var(--color-text);background:transparent;padding:0 16px;font-weight:800;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--color-text)">Bağlan</button>' +
+          '</div>' +
+          '<button class="hv-neutral-200" data-action="generateSync" style="margin-top:8px;width:100%;border:2px solid var(--color-divider);background:transparent;padding:10px;font-weight:700;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-neutral-700)">Yeni kod oluştur (bu cihazda başlat)</button>' +
+          '<div style="margin-top:8px;font-weight:500;font-size:11px;line-height:1.5;color:var(--color-neutral-600)">Bir cihazda kod oluştur, aynı kodu diğer cihazında gir — verilerin anında senkron olur.</div>' +
+        '</div>');
+
   return '' +
     '<div style="padding:18px 18px 14px;border-bottom:2px solid var(--color-text)"><div style="font-weight:900;font-size:26px;line-height:1;letter-spacing:-.02em">Ayarlar</div></div>' +
+    syncSection +
     '<div style="padding:16px 18px;border-bottom:1px solid var(--color-divider)">' +
       '<div style="font-weight:800;font-size:11px;letter-spacing:.16em;text-transform:uppercase">Günlük soru hedefi</div>' +
       '<div style="margin-top:12px;display:flex;align-items:center;gap:0;border:2px solid var(--color-text)">' +
@@ -830,7 +921,10 @@ const ACTIONS = {
   goalDown: () => goalStep(-25),
   toggleSetting: (ds) => toggleSetting(ds.key),
   resetData: () => resetAllData(),
-  installApp: () => installApp()
+  installApp: () => installApp(),
+  saveSyncCode: () => saveSyncCodeAction(),
+  generateSync: () => generateSyncCodeAction(),
+  disconnectSync: () => disconnectSyncAction()
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -846,6 +940,7 @@ document.addEventListener('DOMContentLoaded', () => {
   app.addEventListener('input', (e) => {
     const t = e.target;
     if (t.id === 'mistakeNote') { draftMistakeNote = t.value; return; }
+    if (t.id === 'syncCodeInput') { draftSyncCode = t.value; return; }
     if (t.dataset && t.dataset.denemeField) { draftDeneme[t.dataset.denemeField] = t.value; updateDenemePreview(); }
   });
 
@@ -867,4 +962,5 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   render();
+  if (syncCode) initSync();
 });

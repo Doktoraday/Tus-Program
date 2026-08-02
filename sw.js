@@ -1,14 +1,14 @@
 // Minimal offline app-shell cache for TUS Günlüğü.
 // Bump CACHE_NAME whenever a shipped file changes so clients pick up the update.
-const CACHE_NAME = 'tus-gunlugu-v1';
+const CACHE_NAME = 'tus-gunlugu-v3';
 const SHELL_FILES = [
   './',
   './index.html',
   './styles.css',
   './app.js',
   './manifest.webmanifest',
-  './icons/icon-192.png',
-  './icons/icon-512.png'
+  './icon-192.png',
+  './icon-512.png'
 ];
 
 self.addEventListener('install', (event) => {
